@@ -6,12 +6,51 @@ from multiprocessing import cpu_count
 import os
 import sys
 import getpass
+import yaml
 from jnpr.junos import Device
 from jnpr.junos.utils.config import Config
 from jnpr.junos.factory import loadyaml
 from jnpr.junos.exception import RpcError
+from jnpr.junos.factory.factory_loader import FactoryLoader
 
-globals().update( loadyaml('flowsession.yml'))
+YamlTable = \
+    """---
+    SessionTable:
+      rpc:  get-flow-session-information
+      item:  .//flow-session
+      key:  session-identifier
+      view:  SessionView
+
+    SessionView:
+      groups:
+        in: flow-information[normalize-space(direction)='In']
+        out: flow-information[normalize-space(direction)='Out']
+      fields_in:
+        in_source_address:  source-address
+        in_destination_address:  destination-address
+        in_destination_port:  destination-port
+        in_session_protocol:  protocol
+        in_session_direction:  direction
+      fields_out:
+        out_source_address:  source-address
+        out_destination_address:  destination-address
+        out_destination_port:  destination-port
+        out_session_protocol:  protocol
+        out_in_session_direction:  direction"""
+
+globals().update(FactoryLoader().load(yaml.load(YamlTable)))
+
+JinjaTemplate = \
+    """security {
+        address-book {
+            global {
+                address {{ Address }}/32 {{ Address }}/32;
+                address-set blocked-addresses {
+                    address {{ Address }}/32;
+                }
+            }
+        }
+    }"""
 
 results = ''
 test = []
@@ -77,21 +116,19 @@ def process_device(ip, **kwargs):
         session_table.get()
 
         for s in session_table:
-          if session_table.keys():
-            if s.session_direction == 'In' and s.destination_address == destip and s.destination_port == dport and s.session_protocol == application:
-              print "Found Session matching Source-Address:", s.source_address
+          if session_table.keys() and s.in_destination_address == destip and s.in_destination_port == dport and s.in_session_protocol == application:
+              print "Found Session matching Source-Address:", s.in_source_address
               print "Creating Address-entry and clearing active session"
-              block_src = {'Address': s.source_address}
-              rsp = cu.load( template_path="add-global-address-book-template.conf", template_vars=block_src )
-#              clearflow = dev.rpc.clear_flow_session(destination_prefix=s.destination_address, source_prefix=s.source_address, destination_port=s.destination_port, protocol=s.session_protocol)
+              block_src = {'Address': s.in_source_address}
+              rsp = cu.load( template_path="add-global-address-book-template.conf", template_vars=block_src, merge=True )
+              clearflow = dev.rpc.clear_flow_session(destination_prefix=s.in_destination_address, source_prefix=s.in_source_address, destination_port=s.in_destination_port, protocol=s.in_session_protocol)
 #              cu.commit()
-
-        if destination_address != destip and destination_port != dport and session_protocol != application:
-          print "No Active Sessions were found with the following criteria:"
-          print ""
-          print "Destination IP-Address:", destip
-          print "Destination-Port:", dport
-          print "Application:", application
+        if in_destination_address != destip and in_destination_port != dport and in_session_protocol != application:
+            print "No Active Sessions were found with the following criteria:"
+            print ""
+            print "Destination IP-Address:", destip
+            print "Destination-Port:", dport
+            print "Application:", application
 
     except RpcError:
         msg = "{0} was Skipped due to RPC Error.  Device is not EX/Branch-SRX Series".format(ip.rstrip())
