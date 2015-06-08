@@ -7,6 +7,7 @@ import os
 import sys
 import getpass
 import yaml
+from jinja2 import Template
 from jnpr.junos import Device
 from jnpr.junos.utils.config import Config
 from jnpr.junos.factory import loadyaml
@@ -22,6 +23,9 @@ YamlTable = \
       view:  SessionView
 
     SessionView:
+      fields:
+        re_name:  ../../re-name
+        session_identifier:  session-identifier
       groups:
         in: flow-information[normalize-space(direction)='In']
         out: flow-information[normalize-space(direction)='Out']
@@ -40,20 +44,10 @@ YamlTable = \
 
 globals().update(FactoryLoader().load(yaml.load(YamlTable)))
 
-JinjaTemplate = \
-    """security {
-        address-book {
-            global {
-                address {{ Address }}/32 {{ Address }}/32;
-                address-set blocked-addresses {
-                    address {{ Address }}/32;
-                }
-            }
-        }
-    }"""
+JinjaTemplate = Template('security { address-book { global { address {{ Address }}/32 {{ Address }}/32; address-set blocked-addresses { address {{ Address }}/32; } } } }')
 
 results = ''
-test = []
+process_ip_list = []
 cert = ''
 onedevice = ''
 destip = ''
@@ -64,29 +58,44 @@ application = ''
 
 parser = argparse.ArgumentParser(add_help=True)
 
+
 parser.add_argument("-d", action="store",
-                    help="Specify Device")
+                    help="Specify Device.  Must be separately used from the -l option")
 
 parser.add_argument("-i", action="store",
-                    help="Destination IP-Address")
+                    help="Destination IP-Address - Example: 192.168.0.1", required=True)
 
-parser.add_argument("-a", action="store",
-                    help="Application - Acceptable Values: ah, egp, esp, gre, icmp, icmp6,igmp, ipip, ospf, pim, rsvp, sctp, tcp, udp")
+parser.add_argument("-l", action="store",
+                    help="Specify file containing Device-IP's (example:  -l filename.txt).  If filename not specified, iplist.txt will be used as default.  Must be used separately from the -d option")
+
+parser.add_argument("-a", action="store", choices=['ah', 'egp', 'esp', 'gre', 'icmp', 'icmp6', 'igmp', 'ipip', 'ospf', 'pim', 'rsvp', 'sctp', 'tcp', 'udp'],
+                    help="Application - Acceptable Values: ah, egp, esp, gre, icmp, icmp6, igmp, ipip, ospf, pim, rsvp, sctp, tcp, udp", required=True)
 
 parser.add_argument("-u", action="store",
-                    help="Login with username")
+                    help="Login with username - If -pw is not specified, you will be prompted for password")
 
 parser.add_argument("-p", action="store",
-                    help="Destination Port")
+                    help="Destination Port - Range 1-65535", required=True)
 
 parser.add_argument("-c", action="store_false",
-                    help="Login with Device Certificate")
+                    help="Login with Device Certificate - No Additional input required")
 
-parser.add_argument("-pw", action="store_false",
-                    help="Login with password")
+parser.add_argument("-pw", action="store",
+                    help="Login with password - If -u is not specified, you will be prompted for username")
 
 args = parser.parse_args()
 
+if args.p > '65535' or args.p < '1':
+    print "Please select a TCP Port between 1-65535"
+    parser.print_help()
+    sys.exit()
+else:
+    pass
+
+if args.l and args.d:
+    print " Do not specify -l and -d together."
+    parser.print_help()
+    sys.exit()
 if args.c is False:
     cert = 1
 if args.d:
@@ -97,6 +106,15 @@ if args.i:
     destip = args.i
 if args.a:
     application = args.a
+if args.l:
+    iplist = args.l
+    listips = open(iplist)
+    with listips as f:
+        ip_list = [line.rstrip() for line in f]
+    listips.close()
+elif not args.l and not args.d:
+    with open('iplist.txt') as f:
+        ip_list = [line.rstrip() for line in f]
 if args.u:
     uname = args.u
 if args.p:
@@ -104,53 +122,54 @@ if args.p:
 if args.pw:
     upass = args.pw
 
+jinja_data = open("jinjafile.conf", "wb")
+
 def process_device(ip, **kwargs):
     dev = Device(host=ip, **kwargs)
     cu = Config(dev)
-    print "Searching for active sessions matching Destination IP-Address:", destip, ", Destination-Port:", dport, ", Application:", application
+    print "Searching for active sessions on Device:", ip, "matching the following criteria" + '\n\n\t' + "Destination IP-Address:" + '\t' + destip + '\n\t' + "Destination-Port:" + '\t' +  dport + '\n\t' + "Application:" + '\t\t' +  application + '\n'
 
     try:
 
         dev.open()
         session_table = SessionTable(dev)
         session_table.get()
+        found = 'f'
 
         for s in session_table:
           if session_table.keys() and s.in_destination_address == destip and s.in_destination_port == dport and s.in_session_protocol == application:
-              print "Found Session matching Source-Address:", s.in_source_address
-              print "Creating Address-entry and clearing active session"
+              found = 't'
+              print "Found Session on", ip, s.re_name  + '\n\n\t' + "Source-Address:" + '\t' + s.in_source_address +'\n\t' + "Session-Id:" + '\t' + s.session_identifier + '\n\n' + "Creating Address-entry on Device:", ip + '\n\n' + "Clearing active session" + '\n\t' + "Session-Id:" + '\t' + s.session_identifier + '\n\t' + "Cluster-Node:" + '\t' + s.re_name + '\n'
               block_src = {'Address': s.in_source_address}
-              rsp = cu.load( template_path="add-global-address-book-template.conf", template_vars=block_src, merge=True )
+              jinja_data = open("jinjafile.conf", "wb")
+              jinja_data.write(JinjaTemplate.render(**block_src))
+              jinja_data.close()
+              rsp = cu.load( template_path="jinjafile.conf" )
               clearflow = dev.rpc.clear_flow_session(destination_prefix=s.in_destination_address, source_prefix=s.in_source_address, destination_port=s.in_destination_port, protocol=s.in_session_protocol)
-#              cu.commit()
-        if in_destination_address != destip and in_destination_port != dport and in_session_protocol != application:
-            print "No Active Sessions were found with the following criteria:"
-            print ""
-            print "Destination IP-Address:", destip
-            print "Destination-Port:", dport
-            print "Application:", application
+              cu.commit()
+
+        if found == 'f':
+            print "No Active Sessions were found with the following criteria:" + '\n\n\t' + "Destination IP-Address:" + '\t' + destip + '\n\t' + "Destination Port:" + '\t' + dport +'\n\t' + "Application:" + '\t\t' + application + '\n'
 
     except RpcError:
-        msg = "{0} was Skipped due to RPC Error.  Device is not EX/Branch-SRX Series".format(ip.rstrip())
-        alldatafile.write(msg + '\n')
+        msg = "{0} was Skipped due to RPC Error.  Device is not a Juniper SRX Series".format(ip.rstrip())
         print msg
         dev.close()
 
     except Exception as err:
         msg = "{0} was skipped due to unhandled exception.\n{1}".format(ip.rstrip(), err)
-        alldatafile.write(msg + '\n')
         print msg
         traceback.print_exc(file=sys.stdout)
 
     dev.close()
 
 def runcert(ip):
-    test.append(ip)
+    process_ip_list.append(ip)
     result = process_device(ip)
     return result
 
 def multiRuncert():
-    pool = ThreadPool(cpu_count() * 16)
+    pool = ThreadPool(cpu_count() * 8)
     global ip_list
     global results
     results = pool.map_async(runcert, ip_list)
@@ -158,12 +177,12 @@ def multiRuncert():
     pool.join()
 
 def runuser(ip):
-    test.append(ip)
+    process_ip_list.append(ip)
     result = process_device(ip, user=uname, password=upass)
     return result
 
 def multiRunuser():
-    pool = ThreadPool(cpu_count() * 16)
+    pool = ThreadPool(cpu_count() * 8)
     global ip_list
     global results
     results = pool.map_async(runuser, ip_list)
@@ -173,14 +192,33 @@ def multiRunuser():
 def onefn(runner):
     os.system('clear')
     runner()
+    remove_jinjafile()
     sys.exit()
+
+def remove_jinjafile():
+    os.remove("jinjafile.conf")
 
 if cert:
     onefn(multiRuncert)
-if uname == '':
+    remove_jinjafile()
+if uname == '' and upass == '':
     uname = raw_input("\nDevices will require valid login credentials.\nPlease enter your login name: ")
-if upass == '':
     upass = getpass.getpass(prompt='Please enter your password: ')
     onefn(multiRunuser)
-else:
+    remove_jinjafile()
+if uname != '' and upass == '':
+    upass = getpass.getpass(prompt='Please enter your password: ')
     onefn(multiRunuser)
+    remove_jinjafile()
+if uname != '' and upass != '':
+    onefn(multiRunuser)
+    remove_jinjafile()
+if uname == '' and upass != '':
+    uname = raw_input("\nDevices will require valid login credentials.\nPlease enter your login name: ")
+    onefn(multiRunuser)
+    remove_jinjafile()
+else:
+    uname = raw_input("\nDevices will require valid login credentials.\nPlease enter your login name: ")
+    upass = getpass.getpass(prompt='Please enter your password: ')
+    onefn(multiRunuser)
+    remove_jinjafile()
