@@ -135,7 +135,7 @@ def process_device(ip, **kwargs):
         session_table = SessionTable(dev)
         session_table.get()
         found = 'f'
-
+        cu.lock()
         for s in session_table:
           if session_table.keys() and s.in_destination_address == destip and s.in_destination_port == dport and s.in_session_protocol == application:
               found = 't'
@@ -144,10 +144,12 @@ def process_device(ip, **kwargs):
               jinja_data = open("jinjafile.conf", "wb")
               jinja_data.write(JinjaTemplate.render(**block_src))
               jinja_data.close()
-              rsp = cu.load( template_path="jinjafile.conf" )
+              rsp = cu.load( template_path="jinjafile.conf", merge=True )
               clearflow = dev.rpc.clear_flow_session(destination_prefix=s.in_destination_address, source_prefix=s.in_source_address, destination_port=s.in_destination_port, protocol=s.in_session_protocol)
-              cu.commit()
 
+        cu.commit()
+        cu.unlock()
+        
         if found == 'f':
             print "No Active Sessions were found with the following criteria:" + '\n\n\t' + "Destination IP-Address:" + '\t' + destip + '\n\t' + "Destination Port:" + '\t' + dport +'\n\t' + "Application:" + '\t\t' + application + '\n'
 
