@@ -10,7 +10,6 @@ import yaml
 from jinja2 import Template
 from jnpr.junos import Device
 from jnpr.junos.utils.config import Config
-from jnpr.junos.factory import loadyaml
 from jnpr.junos.exception import RpcError
 from jnpr.junos.factory.factory_loader import FactoryLoader
 
@@ -40,7 +39,19 @@ YamlTable = \
         out_destination_address:  destination-address
         out_destination_port:  destination-port
         out_session_protocol:  protocol
-        out_in_session_direction:  direction"""
+        out_in_session_direction:  direction
+
+    ClusterStatus:
+      rpc:  get-chassis-cluster-status
+      item: .//redundancy-group
+      key:  redundancy-group-id
+      view:  ClusterView
+
+    ClusterView:
+      fields:
+        device_name:  device-stats/device-name
+        redundancy_group_status:  device-stats/redundancy-group-status
+        redundancy_group_id:  redundancy-group-id"""
 
 globals().update(FactoryLoader().load(yaml.load(YamlTable)))
 
@@ -132,24 +143,33 @@ def process_device(ip, **kwargs):
     try:
 
         dev.open()
+        cluster_status = ClusterStatus(dev)
+        cluster_status.get()
         session_table = SessionTable(dev)
         session_table.get()
         found = 'f'
+        cluster = 'a'
         cu.lock()
+
+        for c in cluster_status:
+          if cluster_status.keys():
+            print "SRX Cluster has redundancy-group", c.redundancy_group_id
+          if not cluster_status.keys():
+            print "Clustering is not Enabled"
+
         for s in session_table:
           if session_table.keys() and s.in_destination_address == destip and s.in_destination_port == dport and s.in_session_protocol == application:
-              found = 't'
-              print "Found Session on", ip, s.re_name  + '\n\n\t' + "Source-Address:" + '\t' + s.in_source_address +'\n\t' + "Session-Id:" + '\t' + s.session_identifier + '\n\n' + "Creating Address-entry on Device:", ip + '\n\n' + "Clearing active session" + '\n\t' + "Session-Id:" + '\t' + s.session_identifier + '\n\t' + "Cluster-Node:" + '\t' + s.re_name + '\n'
-              block_src = {'Address': s.in_source_address}
-              jinja_data = open("jinjafile.conf", "wb")
-              jinja_data.write(JinjaTemplate.render(**block_src))
-              jinja_data.close()
-              rsp = cu.load( template_path="jinjafile.conf", merge=True )
-              clearflow = dev.rpc.clear_flow_session(destination_prefix=s.in_destination_address, source_prefix=s.in_source_address, destination_port=s.in_destination_port, protocol=s.in_session_protocol)
-
+            found = 't'
+            print "Found Session on", ip, s.re_name  + '\n\n\t' + "Source-Address:" + '\t' + s.in_source_address +'\n\t' + "Session-Id:" + '\t' + s.session_identifier + '\n\n' + "Creating Address-entry on Device:", ip + '\n\n' + "Clearing active session" + '\n\t' + "Session-Id:" + '\t' + s.session_identifier + '\n\t' + "Cluster-Node:" + '\t' + s.re_name + '\n'
+            block_src = {'Address': s.in_source_address}
+            jinja_data = open("jinjafile.conf", "wb")
+            jinja_data.write(JinjaTemplate.render(**block_src))
+            jinja_data.close()
+            rsp = cu.load( template_path="jinjafile.conf", merge=True )
+            clearflow = dev.rpc.clear_flow_session(destination_prefix=s.in_destination_address, source_prefix=s.in_source_address, destination_port=s.in_destination_port, protocol=s.in_session_protocol)
         cu.commit()
         cu.unlock()
-        
+
         if found == 'f':
             print "No Active Sessions were found with the following criteria:" + '\n\n\t' + "Destination IP-Address:" + '\t' + destip + '\n\t' + "Destination Port:" + '\t' + dport +'\n\t' + "Application:" + '\t\t' + application + '\n'
 
